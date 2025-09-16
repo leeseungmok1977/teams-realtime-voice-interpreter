@@ -1,0 +1,65 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.16",
+  "version": "0.1.0",
+  "id": "a7d3efca-762a-4601-a3d6-08a59e6b03cb",
+  "packageName": "com.example.teams-realtime-voice-interpreter",
+  "developer": {
+    "name": "Your Org",
+    "websiteUrl": "https://localhost:3000",
+    "privacyUrl": "https://localhost:3000/privacy",
+    "termsOfUseUrl": "https://localhost:3000/terms"
+  },
+  "name": {
+    "short": "Realtime Voice Interpreter",
+    "full": "Realtime Voice Interpreter (GPT Realtime)"
+  },
+  "description": {
+    "short": "Live voice-to-voice interpreter using GPT Realtime",
+    "full": "A minimal Teams meeting side panel app that streams mic audio to OpenAI Realtime and plays translated speech back."
+  },
+  "accentColor": "#6264A7",
+  "devicePermissions": [
+    "media"
+  ],
+  "staticTabs": [
+    {
+      "entityId": "home",
+      "scopes": [
+        "personal"
+      ],
+      "contentUrl": "https://localhost:3000/",
+      "name": "Interpreter"
+    }
+  ],
+  "configurableTabs": [
+    {
+      "configurationUrl": "https://localhost:3000/",
+      "canUpdateConfiguration": true,
+      "scopes": [
+        "team",
+        "groupchat"
+      ]
+    }
+  ],
+  "meetingExtensionDefinition": {
+    "scenes": [],
+    "supportsAnonymousGuestUsers": false,
+    "supportsUserLevelPersonalization": false,
+    "tabs": [
+      {
+        "entityId": "meeting-interpreter",
+        "scopes": [
+          "meetingStage",
+          "sidePanel"
+        ],
+        "name": "Interpreter",
+        "contentUrl": "https://localhost:3000/"
+      }
+    ]
+  },
+  "webApplicationInfo": {
+    "id": "YOUR-AAD-APP-ID",
+    "resource": "api://YOUR-AAD-APP-ID"
+  }
+}

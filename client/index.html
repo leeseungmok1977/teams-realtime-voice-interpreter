@@ -1,0 +1,333 @@
+﻿<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Teams Realtime Voice Interpreter</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 32px; }
+    .card { max-width: 560px; border: 1px solid #ddd; border-radius: 12px; padding: 20px; }
+    .row { display: flex; gap: 8px; margin: 10px 0; align-items: center; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #999; cursor: pointer; }
+    select { padding: 8px; border-radius: 6px; }
+    .muted { color: #666; font-size: 0.9rem; }
+    /* Mic level meter */
+    .level { width: 90px; height: 8px; background: #eee; border-radius: 999px; overflow: hidden; position: relative; }
+    .level i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #43a047, #ffb300, #e53935); transition: width 80ms linear; }
+    .level.dim { opacity: 0.4; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Realtime Voice Interpreter (Audio-only)</h2>
+    <div class="row">
+      <label>Mode</label>
+      <select id="mode">
+        <option value="auto" selected>Auto (Korean <-> English)</option>
+        <option value="ko->en">Korean -> English</option>
+        <option value="en->ko">English -> Korean</option>
+      </select>
+      <button id="connect">Connect</button>
+      <button id="disconnect" disabled>Disconnect</button>
+    </div>
+    <div class="row">
+      <button id="mic" disabled>Mic: Off</button>
+      <span id="status" class="muted">Idle</span>
+    </div>
+    <audio id="remote" autoplay playsinline></audio>
+    <p class="muted">Tip: Use a headset to avoid feedback. No text UI is rendered -- only translated speech is played.</p>
+  </div>
+
+  <script type="module">
+    import * as teams from "https://res.cdn.office.net/teams-js/2.19.0/js/MicrosoftTeams.min.js";
+
+    const btnConnect = document.getElementById("connect");
+    const btnDisconnect = document.getElementById("disconnect");
+    const btnMic = document.getElementById("mic");
+    const statusEl = document.getElementById("status");
+    const modeSel = document.getElementById("mode");
+    const remoteAudio = document.getElementById("remote");
+
+    let pc = null;
+    let localStream = null;
+    let audioCtx = null, analyser = null, meterRAF = null;
+    let micLevelEl = null, micFillEl = null;
+    let eventsChannel = null;
+    let hasStartedConversation = false;
+    let pendingResponse = false;
+    let pendingInstructions = '';
+
+    async function initTeams() {
+      try {
+        if (!(teams?.app?.initialize)) {
+          throw new Error("Teams SDK not available in this context");
+        }
+        await teams.app.initialize();
+        // Request Teams media permission (Teams context)
+        if (teams?.permissions?.request) {
+          await teams.permissions.request({ permissions: ["media"] });
+        }
+      } catch (e) {
+        console.warn("Teams initialize/permission skipped or failed:", e);
+      }
+    }
+
+    async function getMic() {
+      if (localStream) return localStream;
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 }
+      });
+      return localStream;
+    }
+
+    function setStatus(txt) { statusEl.textContent = txt; }
+
+    async function connect() {
+      await initTeams();
+      const mode = modeSel.value;
+      pendingInstructions = instructionsForMode(mode);
+      const stream = await getMic();
+      // ensure mic meter UI exists next to the button
+      if (!micLevelEl) {
+        micLevelEl = document.createElement('div');
+        micLevelEl.id = 'micLevel';
+        micLevelEl.className = 'level dim';
+        micLevelEl.title = 'Mic level (sent)';
+        micLevelEl.innerHTML = '<i></i>';
+        btnMic.insertAdjacentElement('afterend', micLevelEl);
+        micFillEl = micLevelEl.querySelector('i');
+      }
+      setupMicMeter(stream);
+      hasStartedConversation = false;
+      eventsChannel = null;
+      pendingResponse = false;
+      setStatus("Creating PeerConnection...");
+      pc = new RTCPeerConnection({
+        iceServers: [ { urls: 'stun:stun.l.google.com:19302' } ]
+      });
+      // Ensure we negotiate a recvonly audio track for model TTS
+      try { pc.addTransceiver('audio', { direction: 'recvonly' }); } catch {}
+
+      // Setup data channel for realtime events (response.create, transcripts, etc.)
+      setupEventsChannel(pc.createDataChannel('oai-events'));
+      pc.ondatachannel = (ev) => setupEventsChannel(ev.channel);
+
+      // Helpful connection state logs
+      pc.oniceconnectionstatechange = () => console.log('[webrtc] ice:', pc.iceConnectionState);
+      pc.onconnectionstatechange = () => console.log('[webrtc] pc:', pc.connectionState);
+      pc.onsignalingstatechange = () => console.log('[webrtc] signaling:', pc.signalingState);
+      pc.onicegatheringstatechange = () => console.log('[webrtc] iceGathering:', pc.iceGatheringState);
+
+      // Send mic track
+      const micTrack = stream.getAudioTracks()[0];
+      pc.addTrack(micTrack, stream);
+
+      // Receive model TTS audio
+      pc.ontrack = (e) => {
+        console.log('[webrtc] remote track', e.track?.kind, e.streams?.[0]);
+        remoteAudio.srcObject = e.streams[0];
+        remoteAudio.muted = false;
+        remoteAudio.volume = 1.0;
+        if (e.track) {
+          e.track.onunmute = () => {
+            console.log('[webrtc] remote track active');
+            remoteAudio.play().catch(err => console.error('[webrtc] play error', err?.name || err?.message || err));
+          };
+          e.track.onmute = () => console.log('[webrtc] remote track muted');
+        }
+        remoteAudio.play().catch(err => console.error('[webrtc] play error', err?.name || err?.message || err));
+      };
+
+      // SDP offer 생성
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+
+      // 세션 생성 + SDP 교환은 서버에 요청
+      const sdpRes = await fetch("/realtime/sdp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, offerSdp: offer.sdp })
+      });
+
+      const answerSdp = await sdpRes.text();
+      if (!sdpRes.ok || !answerSdp.startsWith("v=")) {
+        console.error('[webrtc] SDP exchange failed', sdpRes.status, answerSdp.slice(0,200));
+        throw new Error(`SDP exchange failed: ${sdpRes.status} ${answerSdp.slice(0,120)}`);
+      }
+
+      try {
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      } catch (e) {
+        console.error('[webrtc] setRemoteDescription error', e);
+        throw e;
+      }
+
+      btnMic.disabled = false;
+      btnDisconnect.disabled = true; // mic toggles sending; disconnect tears down
+      btnConnect.disabled = true;
+      setStatus("Connected. Mic ON when button says 'On'.");
+
+      // Auto start mic
+      await toggleMic(true);
+      if (typeof micLevelEl !== 'undefined' && micLevelEl) {
+        micLevelEl.classList.toggle('dim', false);
+      }
+    }
+
+    async function disconnect() {
+      if (pc) {
+        pc.getSenders().forEach(s => { try { s.replaceTrack(null); } catch {} });
+        pc.close();
+      }
+      if (eventsChannel) {
+        try { eventsChannel.close(); } catch {}
+      }
+      eventsChannel = null;
+      hasStartedConversation = false;
+      pendingResponse = false;
+      pc = null;
+      btnConnect.disabled = false;
+      btnDisconnect.disabled = true;
+      btnMic.disabled = true;
+      setStatus("Disconnected");
+    }
+
+    async function toggleMic(on) {
+      const track = localStream?.getAudioTracks()?.[0];
+      if (!track) return;
+      track.enabled = !!on;
+      btnMic.textContent = on ? "Mic: On" : "Mic: Off";
+      btnDisconnect.disabled = !on && !pc; // just UX
+      setStatus(on ? "Streaming mic to model..." : "Mic muted (no audio sent).");
+    }
+
+    btnConnect.addEventListener("click", () => connect().catch(e => setStatus("Error: " + e.message)));
+    btnDisconnect.addEventListener("click", () => disconnect());
+    btnMic.addEventListener("click", async () => {
+      const track = localStream?.getAudioTracks()?.[0];
+      const now = !(track?.enabled);
+      await toggleMic(now);
+      if (typeof micLevelEl !== 'undefined' && micLevelEl) {
+        micLevelEl.classList.toggle('dim', !now);
+      }
+    });
+
+    function setupEventsChannel(channel) {
+      if (!channel) return;
+      console.log('[webrtc] datachannel', channel.label);
+      if (channel.label !== 'oai-events') return;
+      eventsChannel = channel;
+      channel.onopen = () => {
+        console.log('[webrtc] oai-events open');
+        pendingResponse = false;
+      };
+      channel.onmessage = (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          if (data?.type === 'response.completed') {
+            console.log('[webrtc] response complete', data.response?.id, data.response);
+            pendingResponse = false;
+          } else if (data?.type === 'conversation.item.input_audio_transcription.completed') {
+            console.log('[webrtc] transcript', data.transcript);
+            if (!pendingResponse) {
+              maybeSendResponse();
+            }
+          } else if (data?.type) {
+            console.log('[webrtc] event', data.type, data);
+          } else {
+            console.log('[webrtc] data', data);
+          }
+        } catch (e) {
+          console.log('[webrtc] raw message', evt.data);
+        }
+      };
+      channel.onclose = () => {
+        console.log('[webrtc] oai-events closed');
+        eventsChannel = null;
+        hasStartedConversation = false;
+        pendingResponse = false;
+      };
+      channel.onerror = (evt) => console.error('[webrtc] oai-events error', evt);
+    }
+
+    function maybeSendResponse() {
+      if (!eventsChannel || eventsChannel.readyState !== 'open') return;
+      if (pendingResponse) return;
+      try {
+        const responsePayload = {
+          modalities: ['text', 'audio']
+        };
+        if (pendingInstructions) {
+          responsePayload.instructions = pendingInstructions;
+        }
+        const payload = { type: 'response.create', response: responsePayload };
+        eventsChannel.send(JSON.stringify(payload));
+        pendingResponse = true;
+        hasStartedConversation = true;
+        console.log('[webrtc] response.create sent', payload);
+      } catch (err) {
+        console.error('[webrtc] response.create failed', err);
+      }
+    }
+
+    function setupMicMeter(stream) {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        source.connect(analyser);
+        const buf = new Float32Array(analyser.fftSize);
+        cancelAnimationFrame(meterRAF);
+        const tick = () => {
+          analyser.getFloatTimeDomainData(buf);
+          let sum = 0;
+          for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+          let rms = Math.sqrt(sum / buf.length);
+          let level = Math.min(1, rms * 4);
+          const sending = !!localStream?.getAudioTracks()?.[0]?.enabled;
+          const pct = sending ? Math.round(level * 100) : 0;
+          if (micFillEl) micFillEl.style.width = pct + '%';
+          meterRAF = requestAnimationFrame(tick);
+        };
+        tick();
+      } catch (e) {
+        console.warn('mic meter init failed', e);
+      }
+    }
+
+    function instructionsForMode(mode) {
+      if (mode === 'ko->en') {
+        return 'You are a simultaneous interpreter. Detect Korean and respond as NATURAL English speech only.';
+      }
+      if (mode === 'en->ko') {
+        return 'You are a simultaneous interpreter. Detect English and respond as NATURAL Korean speech only, polite business tone.';
+      }
+      return 'You are a simultaneous interpreter. Auto-detect Korean/English and speak in the opposite language, concise and professional.';
+    }
+  </script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

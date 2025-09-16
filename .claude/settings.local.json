@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(winget install:*)",
+      "Bash(cmd /c:*)",
+      "Bash(\"C:\\Program Files (x86)\\Microsoft SDKs\\Azure\\CLI2\\wbin\\az.cmd\" --version)",
+      "Bash(dir)",
+      "WebFetch(domain:vercel.com)",
+      "Bash(git init:*)",
+      "Bash(git add:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
