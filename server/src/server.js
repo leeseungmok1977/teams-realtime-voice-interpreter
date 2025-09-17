@@ -1,23 +1,24 @@
-import express from "express";
+﻿import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import path from "path";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 
-dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.join(__dirname, '../.env'), override: true });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ORIGIN = process.env.ORIGIN || `http://localhost:${PORT}`;
 const SESSIONS_URL = process.env.OPENAI_REALTIME_SESSIONS_URL || "https://api.openai.com/v1/realtime/sessions";
-const REALTIME_URL = process.env.OPENAI_REALTIME_URL || "https://api.openai.com/v1/realtime"; // SDP 교환??베이??URL
+const REALTIME_URL = process.env.OPENAI_REALTIME_URL || "https://api.openai.com/v1/realtime"; // SDP 援먰솚??踰좎씠??URL
 const VOICE = process.env.OPENAI_REALTIME_VOICE || "alloy";
-// 최신 기본 모델 ?�선 ?�용 (?�경변?�로 ?�버?�이??가??
-const PRIMARY_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
-const FALLBACK_MODEL = "gpt-realtime"; // 추�? ?�보
+// 理쒖떊 湲곕낯 紐⑤뜽 ?곗꽑 ?ъ슜 (?섍꼍蹂?섎줈 ?ㅻ쾭?쇱씠??媛??
+const PRIMARY_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-4o-mini-realtime-preview";
+const FALLBACK_MODEL = "gpt-4o-mini-realtime-preview"; // 異붽? ?꾨낫
 
 app.use(cors({ origin: ORIGIN, credentials: true }));
 app.use(express.json({ limit: "2mb" }));
@@ -34,7 +35,7 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// ?�션 ?�성 ?�수 (?�버�?로그 ?�함)
+// ?몄뀡 ?앹꽦 ?⑥닔 (?붾쾭洹?濡쒓렇 ?ы븿)
 async function createRealtimeSession({ model, instructions }) {
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   if (!OPENAI_API_KEY) {
@@ -48,7 +49,7 @@ async function createRealtimeSession({ model, instructions }) {
     modalities: ["text", "audio"],
     turn_detection: { type: "server_vad" },
     input_audio_transcription: {
-      // gpt-5-mini-transcribe ?�재 미�?????공식 지??모델 ?�용
+      // gpt-5-mini-transcribe ?꾩옱 誘몄?????怨듭떇 吏??紐⑤뜽 ?ъ슜
       model: "gpt-4o-mini-transcribe"
     }
   };
@@ -58,7 +59,7 @@ async function createRealtimeSession({ model, instructions }) {
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
       "Content-Type": "application/json",
-      "OpenAI-Beta": "realtime=v1"       // ?�� ?�수
+      "OpenAI-Beta": "realtime=v1"       // ?뵶 ?꾩닔
     },
     body: JSON.stringify(body)
   });
@@ -70,7 +71,7 @@ async function createRealtimeSession({ model, instructions }) {
    throw new Error(`OpenAI session failed: ${resp.status} ${text}`);
   }
 
-  // ?�떤 경우??HTML/공�? ?�이지가 ?????�으??방�?
+  // ?대뼡 寃쎌슦??HTML/怨듭? ?섏씠吏媛 ?????덉쑝??諛⑹?
   if (text.trim().startsWith("<!DOCTYPE html")) {
     console.error("[session:create] HTML received (proxy/portal?)", text.slice(0, 200));
     throw new Error("HTML page received instead of JSON (check proxy/firewall)");
@@ -84,14 +85,14 @@ async function createRealtimeSession({ model, instructions }) {
     throw new Error("Session JSON parse error");
   }
 
-  // OpenAI ?��? ?�러 ?�식 ?�파
+  // OpenAI ?쒖? ?먮윭 ?뺤떇 ?꾪뙆
   if (json && json.error) {
     const msg = json.error.message || json.error.code || "Unknown OpenAI error";
     console.error("[session:create] OpenAI error payload:", json);
     throw new Error(`OpenAI session error: ${msg}`);
   }
 
-  const sessionUrl = json.url; // ?��? 구버???��? ?�답???�함?????�음
+  const sessionUrl = json.url; // ?쇰? 援щ쾭???대? ?묐떟???ы븿?????덉쓬
   const ephemeral = json.client_secret?.value;
   if (!ephemeral) {
     console.error("[session:create] Missing fields in response (full json):", json);
@@ -110,11 +111,11 @@ app.post("/realtime/sdp", async (req, res) => {
     }
 
     const instructions =
-      mode === "ko->en" ? "You are a simultaneous interpreter. Detect Korean and respond as NATURAL English speech only."
-    : mode === "en->ko" ? "You are a simultaneous interpreter. Detect English and respond as NATURAL Korean speech only, polite business tone."
-    : "You are a simultaneous interpreter. Auto-detect Korean/English and speak in the opposite language, concise and professional.";
+      mode === "ko->en" ? "You are a translation machine. Input: Korean speech. Output: EXACT English translation only. NEVER respond to content, NEVER add your own thoughts, NEVER answer questions. Just translate Korean to English word-for-word."
+    : mode === "en->ko" ? "You are a translation machine. Input: English speech. Output: EXACT Korean translation only. NEVER respond to content, NEVER add your own thoughts, NEVER answer questions. Just translate English to Korean word-for-word with polite tone."
+    : "You are a translation machine. Auto-detect input language (Korean/English). Output: EXACT translation to opposite language only. NEVER respond to content, NEVER add thoughts, NEVER answer questions. Just translate word-for-word.";
 
-    // 1) 기본 모델 ?�도 ???�패 ???�백
+    // 1) 湲곕낯 紐⑤뜽 ?쒕룄 ???ㅽ뙣 ???대갚
     let modelTried = PRIMARY_MODEL;
     let session;
     try {
@@ -129,8 +130,8 @@ app.post("/realtime/sdp", async (req, res) => {
       }
     }
 
-    // 2) ?�버가 SDP 교환 (?�라 ???�버 ??OpenAI)
-    // ?�션 ?�답??url???�으�?공식 ?�드?�인??+ model 쿼리�??�용
+    // 2) ?쒕쾭媛 SDP 援먰솚 (?대씪 ???쒕쾭 ??OpenAI)
+    // ?몄뀡 ?묐떟??url???놁쑝硫?怨듭떇 ?붾뱶?ъ씤??+ model 荑쇰━瑜??ъ슜
     const sdpUrl = session.sessionUrl || `${REALTIME_URL}?model=${encodeURIComponent(modelTried)}`;
     const answerRes = await fetch(sdpUrl, {
       method: "POST",
@@ -138,7 +139,7 @@ app.post("/realtime/sdp", async (req, res) => {
         Authorization: `Bearer ${session.ephemeral}`,
         "Content-Type": "application/sdp",
         "Accept": "application/sdp",
-        "OpenAI-Beta": "realtime=v1"     // ?�� ?�수
+        "OpenAI-Beta": "realtime=v1"     // ?뵶 ?꾩닔
       },
       body: offerSdp
     });
@@ -156,7 +157,7 @@ app.post("/realtime/sdp", async (req, res) => {
   }
 });
 
-// 기본 ?�이지
+// 湲곕낯 ?섏씠吏
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "../../client/index.html"));
 });
@@ -164,3 +165,4 @@ app.get("/", (_req, res) => {
 app.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT}`);
 });
+
