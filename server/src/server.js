@@ -47,7 +47,12 @@ async function createRealtimeSession({ model, instructions }) {
     voice: VOICE,
     instructions,
     modalities: ["text", "audio"],
-    turn_detection: { type: "server_vad" },
+    turn_detection: {
+      type: "server_vad",
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: 800
+    },
     input_audio_transcription: {
       // gpt-5-mini-transcribe ?꾩옱 誘몄?????怨듭떇 吏??紐⑤뜽 ?ъ슜
       model: "gpt-4o-mini-transcribe"
